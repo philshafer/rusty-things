@@ -28,13 +28,13 @@ use regex::Regex;
 enum Error {
     #[snafu(display("Could not open input file '{}': {}",
                     path.display(), source))]
-    FileError {
+    Open {
         path: PathBuf,
         source: std::io::Error,
     },
     #[snafu(display("Could not parse input file '{}': {}",
                     path.display(), source))]
-    ParseError {
+    Parse {
         path: PathBuf,
         source: exif::Error,
     },
@@ -44,8 +44,8 @@ enum Error {
         path: PathBuf,
         field: String,
     },
-    #[snafu(display("file is too small (thumbnail?) '{}': {}",
-                    path.display(), len))]
+    #[snafu(display("file size ({}) is too small (thumbnail?): '{}'",
+                    len, path.display()))]
     TooSmall {
         path: PathBuf,
         len: u64,
@@ -55,13 +55,10 @@ enum Error {
 //
 // This is a set of JPEG attributes we use to find the date of the photo.
 //
-lazy_static! {
-    static ref DATETIME: Vec<exif::Tag>
-        = vec![exif::Tag::DateTimeDigitized,
+const DATETIME: &[exif::Tag] = &[exif::Tag::DateTimeDigitized,
                exif::Tag::DateTimeOriginal,
                exif::Tag::DateTime,
         ];
-}
 
 lazy_static! {
     static ref DATE_REGEX : Regex = Regex::new(
@@ -107,11 +104,11 @@ fn main() {
 
     let mut files: Vec<PathBuf> = match args.values_of_os("file") {
         None => vec![],
-        Some(f) => f.map(|p| PathBuf::from(p)).collect(),
+        Some(f) => f.map(PathBuf::from).collect(),
     };
     let lists: Vec<PathBuf> = match args.values_of_os("list") {
         None => vec![],
-        Some(f) => f.map(|p| PathBuf::from(p)).collect(),
+        Some(f) => f.map(PathBuf::from).collect(),
     };
 
     for list in lists {
@@ -147,7 +144,7 @@ fn main() {
         let targ = {
             match link_name(&file) {
                 Ok(targ) => targ,
-                Err(e) => { println!("error: {:?}", e); continue 'file; }
+                Err(e) => { println!("error: {}", e); continue 'file; }
             }
         };
 
@@ -176,7 +173,7 @@ fn main() {
 }
 
 fn link_name (path: &Path) -> Result<PathBuf, Error> {
-    let file = File::open(path).context(FileError { path })?;
+    let file = File::open(path).context(Open { path })?;
 
     if let Ok(i) = file.metadata() {
         if i.len() < 100 * 1024 {
@@ -188,7 +185,7 @@ fn link_name (path: &Path) -> Result<PathBuf, Error> {
     let mut bufreader = std::io::BufReader::new(&file);
     let exifreader = exif::Reader::new();
     let exif = exifreader.read_from_container(&mut bufreader)
-        .context(ParseError{ path })?;
+        .context(Parse{ path })?;
     
     for f in exif.fields() {
         println!("'{}' [{}] :: '{}'",
@@ -213,7 +210,7 @@ fn link_name (path: &Path) -> Result<PathBuf, Error> {
     let s2 = s.replace(" ", "-");
     target.push(PathBuf::from(s2));
 
-    println!("target '{:?}", target);
+    println!("target {:?}", target);
 
     Ok(PathBuf::from(target))
 }
@@ -222,7 +219,7 @@ fn link_name (path: &Path) -> Result<PathBuf, Error> {
 /// Look through the EXIF data for a set of fields, returning the first one.
 /// Tags are exif::Tag::* values (e.g. exif::Tag::DateTimeDigitized).
 //
-fn first_of (path: &Path, exif: &Exif, tags: &Vec<exif::Tag>)
+fn first_of (path: &Path, exif: &Exif, tags: &[exif::Tag])
              -> Result<String, Error> {
     for tag in tags {
         if let Some(value) = exif.get_field(*tag, exif::In::PRIMARY) {
