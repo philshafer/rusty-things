@@ -72,6 +72,12 @@ fn main() {
         .author("phil@")
         .about("Links images based on date")
         .arg(
+            Arg::with_name("exif")
+                .short("e")
+                .long("exif")
+                .help("dump exif information; don't make links"),
+        )
+        .arg(
             Arg::with_name("file")
                 .multiple(true)
                 .help("name of file to link"),
@@ -97,10 +103,33 @@ fn main() {
                 .long("no-execute")
                 .help("Don't really make links"),
         )
+        .arg(
+            Arg::with_name("verbose")
+                .short("v")
+                .long("verbose")
+                .help("Make some noise!"),
+        )
         .get_matches();
 
-    let base = args.value_of("base");
-    println!("base is {}", base.unwrap_or("."));
+    let verbose = args.is_present("verbose");
+    let dump = args.is_present("exif");
+
+    let base_set;
+    let base;
+    match args.value_of("base") {
+        Some(b) => {
+            base_set = true;
+            base = b;
+        },
+        None => {
+            base_set = false;
+            base = ".";
+        },
+    }
+
+    if verbose {
+        println!("# base is {}", base);
+    }
 
     let mut files: Vec<PathBuf> = match args.values_of_os("file") {
         None => vec![],
@@ -113,49 +142,73 @@ fn main() {
 
     for list in lists {
         let file = File::open(&list).unwrap();
-        println!("list: {:?}", list);
+        if verbose {
+            println!("# list: {:?}", list);
+        }
+
         for line in BufReader::new(file).lines() {
             let line = line.unwrap();
-            println!("{}", line);
+            if verbose {
+                println!("# {}", line);
+            }
             files.push(PathBuf::from(&line.trim()));
         }
     }
 
-    println!("The file passed is: {:?}", files);
+    if verbose {
+        println!("# The files passed are: {:?}", files);
+    }
 
     let no_execute = args.is_present("no-execute");
-    if no_execute {
-        println!("not executing...");
+    if verbose && no_execute {
+        println!("# not executing...");
     } else {
-        println!("executing...");
+        println!("# executing...");
     }
 
     'file: for file in files {
-        println!("working: {:?}", file);
+        if verbose {
+            println!("# working: {:?}", file);
+        }
 
         let mut source = PathBuf::new();
-        source.push("../../..");
-        if let Some(b) = base {
-            source.push(b);
+        if base_set {
+            source.push("..");
         }
+
+        source.push("../../..");
         source.push(&file);
         let src = source.as_path();
 
-        let targ = {
-            match link_name(&file) {
-                Ok(targ) => targ,
-                Err(e) => { println!("error: {}", e); continue 'file; }
+        let exif = {
+            match get_exif(&file, dump) {
+                Ok(e) => e,
+                Err(e) => { println!("# error: {}", e); continue 'file; },
             }
         };
 
-        println!("linking {:?} to {:?} ... ", src, targ);
+        let targ = {
+            match link_name(&exif, &file, base, verbose) {
+                Ok(targ) => targ,
+                Err(e) => { println!("# error: {}", e); continue 'file; },
+            }
+        };
+
+        if dump {
+            println!("# target: {:?}", targ);
+            continue;
+        }
+
+        if verbose {
+            println!("# linking {:?} to {:?} ... ", src, targ);
+        }
 
         if let Some(parent) = targ.parent() {
             if !parent.exists() {
                 println!("mkdir -p {:?}", parent);
                 if !no_execute {
                     if let Err(e) = fs::create_dir_all(parent) {
-                        println!("error: {:?}", e);
+                        println!("# error: {:?}", e);
                     }
                 }
             }
@@ -166,13 +219,13 @@ fn main() {
             use std::os::unix::fs;
 
             if let Err(e) = fs::symlink(src, targ) {
-                println!("error: {:?}", e);
+                println!("# error: {:?}", e);
             }                
         }
     }
 }
 
-fn link_name (path: &Path) -> Result<PathBuf, Error> {
+fn get_exif (path: &Path, verbose: bool) -> Result<Exif, Error> {
     let file = File::open(path).context(Open { path })?;
 
     if let Ok(i) = file.metadata() {
@@ -188,17 +241,30 @@ fn link_name (path: &Path) -> Result<PathBuf, Error> {
         .context(Parse{ path })?;
     
     for f in exif.fields() {
-        println!("'{}' [{}] :: '{}'",
-                 f.tag, f.ifd_num, f.display_value().with_unit(&exif));
+        if verbose && f.tag != exif::Tag::MakerNote {
+            println!("# '{}' [{}] :: '{}'",
+                     f.tag, f.ifd_num, f.display_value().with_unit(&exif));
+        }
     }
 
+    Ok(exif)
+}
+
+fn link_name (exif: &Exif, path: &Path, base: &str, verbose: bool)
+              -> Result<PathBuf, Error> {
     let datetime = first_of(path, &exif, &DATETIME)?;
-    println!("datetime '{}'", datetime);
+    if verbose {
+        println!("# datetime '{}'", datetime);
+    }
 
     let res = DATE_REGEX.replace_all(&datetime, "$y/$m/$d/$H-$M-$S-");
-    println!("datetime '{}'", res);
+    if verbose {
+        println!("# datetime '{}'", res);
+    }
     
     let mut target = OsString::new();
+    target.push(base);
+    target.push("/");
     target.push(res.to_string());
 
     let s = {
@@ -210,7 +276,9 @@ fn link_name (path: &Path) -> Result<PathBuf, Error> {
     let s2 = s.replace(" ", "-");
     target.push(PathBuf::from(s2));
 
-    println!("target {:?}", target);
+    if verbose {
+        println!("# target {:?}", target);
+    }
 
     Ok(PathBuf::from(target))
 }
